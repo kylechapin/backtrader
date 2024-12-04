@@ -1,0 +1,114 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+def calculate_atr(df, period):
+    """
+    Calculate ATR for a given period.
+    """
+    high_low = df['High'] - df['Low']
+    high_close = abs(df['High'] - df['Close'].shift(1))
+    low_close = abs(df['Low'] - df['Close'].shift(1))
+    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = true_range.rolling(window=period).mean()
+    return atr
+
+def detect_resistance_levels(atr_values, tolerance=0.01):
+    """
+    Detect resistance levels in ATR values.
+    """
+    resistance_levels = []
+    for i in range(2, len(atr_values)):
+        if atr_values[i-1] > atr_values[i-2] and atr_values[i-1] > atr_values[i]:
+            if not resistance_levels or abs(resistance_levels[-1][1] - atr_values[i-1]) > tolerance * atr_values.max():
+                resistance_levels.append((i-1, atr_values[i-1]))
+    return resistance_levels
+
+def avoid_high_atr(df, atr_column, threshold=12):
+    """
+    Flag periods where ATR exceeds a specified threshold.
+    """
+    df['Avoid_Trade'] = df[atr_column] > threshold
+    return df
+
+def detect_order_blocks(df, consolidation_period=5, breakout_factor=1.5):
+    """
+    Detect order blocks based on consolidation zones and breakout moves.
+    """
+    df['Range'] = df['High'] - df['Low']
+    df['Rolling_Range'] = df['Range'].rolling(window=consolidation_period).mean()
+    df['Consolidation'] = (df['Range'] <= df['Rolling_Range'])
+    df['Breakout'] = False
+
+    for i in range(consolidation_period, len(df)):
+        if df['Consolidation'].iloc[i - consolidation_period:i].all():
+            breakout_range = df['Range'].iloc[i] >= breakout_factor * df['Rolling_Range'].iloc[i]
+            if breakout_range:
+                df.at[i, 'Breakout'] = True
+
+    order_blocks = []
+    for i in range(consolidation_period, len(df)):
+        if df['Breakout'].iloc[i]:
+            start = i - consolidation_period
+            end = i
+            order_blocks.append((start, end, df['Low'].iloc[start:end].min(), df['High'].iloc[start:end].max()))
+    
+    return df, order_blocks
+
+# Load your intraday 3-minute data (replace this with actual data)
+data = {
+    'High': np.random.uniform(100, 110, 300),
+    'Low': np.random.uniform(90, 100, 300),
+    'Close': np.random.uniform(95, 105, 300)
+}
+df = pd.DataFrame(data)
+
+# Add timestamps for visualization (assume intraday 3-minute data)
+df['Timestamp'] = pd.date_range("2023-01-01 09:30", periods=len(df), freq='3T')
+df.set_index('Timestamp', inplace=True)
+
+# Calculate ATR for 6 and 18 periods
+df['ATR_6'] = calculate_atr(df, period=6)
+df['ATR_18'] = calculate_atr(df, period=18)
+
+# Detect resistance levels
+resistance_6 = detect_resistance_levels(df['ATR_6'].dropna(), tolerance=0.02)
+resistance_18 = detect_resistance_levels(df['ATR_18'].dropna(), tolerance=0.02)
+
+# Add column to flag high ATR values
+df = avoid_high_atr(df, atr_column='ATR_6', threshold=12)
+
+# Detect order blocks
+df, order_blocks = detect_order_blocks(df, consolidation_period=5, breakout_factor=1.5)
+
+# Plot results
+plt.figure(figsize=(14, 10))
+
+# Plot ATR_6 with "Avoid Trade" zones
+plt.subplot(3, 1, 1)
+plt.plot(df['ATR_6'], label='ATR 6 Period', color='blue')
+plt.fill_between(df.index, 0, df['ATR_6'], where=df['Avoid_Trade'], color='red', alpha=0.2, label='Avoid Trade Zone')
+for index, value in resistance_6:
+    plt.axhline(y=value, color='green', linestyle='--', alpha=0.6, label=f'Resistance at {value:.2f}' if index == resistance_6[0][0] else "")
+plt.title("ATR 6 Period with Resistance Levels and Avoid Trade Zones")
+plt.legend()
+
+# Plot ATR_18
+plt.subplot(3, 1, 2)
+plt.plot(df['ATR_18'], label='ATR 18 Period', color='green')
+for index, value in resistance_18:
+    plt.axhline(y=value, color='orange', linestyle='--', alpha=0.6, label=f'Resistance at {value:.2f}' if index == resistance_18[0][0] else "")
+plt.title("ATR 18 Period with Resistance Levels")
+plt.legend()
+
+# Plot Order Blocks
+plt.subplot(3, 1, 3)
+plt.plot(df['Close'], label='Close Price', color='blue')
+for start, end, low, high in order_blocks:
+    plt.axvspan(df.index[start], df.index[end], color='orange', alpha=0.3, label='Order Block' if start == order_blocks[0][0] else "")
+    plt.hlines([low, high], xmin=df.index[start], xmax=df.index[end], color='red', linestyle='--', alpha=0.6)
+plt.title("Order Blocks Detection")
+plt.legend()
+
+plt.tight_layout()
+plt.show()
