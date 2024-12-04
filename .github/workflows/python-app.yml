@@ -1,0 +1,174 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+def calculate_atr(df, period):
+    high_low = df['High'] - df['Low']
+    high_close = abs(df['High'] - df['Close'].shift(1))
+    low_close = abs(df['Low'] - df['Close'].shift(1))
+    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = true_range.rolling(window=period).mean()
+    return atr
+
+def detect_resistance_levels(atr_values, tolerance=0.01):
+    resistance_levels = []
+    for i in range(2, len(atr_values)):
+        if atr_values[i-1] > atr_values[i-2] and atr_values[i-1] > atr_values[i]:
+            if not resistance_levels or abs(resistance_levels[-1][1] - atr_values[i-1]) > tolerance * atr_values.max():
+                resistance_levels.append((i-1, atr_values[i-1]))
+    return resistance_levels
+
+def avoid_high_atr(df, atr_column, threshold=12):
+    df['Avoid_Trade'] = df[atr_column] > threshold
+    return df
+
+def detect_order_blocks(df, consolidation_period=5, breakout_factor=1.5):
+    df['Range'] = df['High'] - df['Low']
+    df['Rolling_Range'] = df['Range'].rolling(window=consolidation_period).mean()
+    df['Consolidation'] = (df['Range'] <= df['Rolling_Range'])
+    df['Breakout'] = False
+
+    for i in range(consolidation_period, len(df)):
+        if df['Consolidation'].iloc[i - consolidation_period:i].all():
+            breakout_range = df['Range'].iloc[i] >= breakout_factor * df['Rolling_Range'].iloc[i]
+            if breakout_range:
+                df.at[i, 'Breakout'] = True
+
+    order_blocks = []
+    for i in range(consolidation_period, len(df)):
+        if df['Breakout'].iloc[i]:
+            start = i - consolidation_period
+            end = i
+            order_blocks.append((start, end, df['Low'].iloc[start:end].min(), df['High'].iloc[start:end].max()))
+    
+    return df, order_blocks
+
+def detect_liquidity_sweeps(df, lookback_period=20):
+    df['Recent_High'] = df['High'].rolling(window=lookback_period).max()
+    df['Recent_Low'] = df['Low'].rolling(window=lookback_period).min()
+    df['Sweep_High'] = (df['High'] > df['Recent_High']) & (df['Close'] < df['Recent_High'])
+    df['Sweep_Low'] = (df['Low'] < df['Recent_Low']) & (df['Close'] > df['Recent_Low'])
+    return df
+
+def calculate_trend(df, period=20):
+    df['SMA'] = df['Close'].rolling(window=period).mean()
+    df['Trend'] = np.where(df['Close'] > df['SMA'], 'Bullish', 'Bearish')
+    return df
+
+def resample_to_timeframe(df, timeframe):
+    resampled = df.resample(timeframe).agg({
+        'Open': 'first',
+        'High': 'max',
+        'Low': 'min',
+        'Close': 'last',
+        'Volume': 'sum'
+    }).dropna()
+    return resampled
+
+def only_trade_when_trends_match(df_3m, df_1h):
+    df_1h_aligned = df_1h.reindex(df_3m.index, method='ffill')
+    df_3m['Trend_Match'] = df_3m['Trend'] == df_1h_aligned['Trend']
+    return df_3m
+
+def detect_bounces(df, threshold=0.01):
+    df['Bounce'] = False
+    for i in range(1, len(df)):
+        if df['Trend'].iloc[i] == 'Bullish' and df['Low'].iloc[i] < df['SMA'].iloc[i] * (1 - threshold):
+            df.at[i, 'Bounce'] = True
+        elif df['Trend'].iloc[i] == 'Bearish' and df['High'].iloc[i] > df['SMA'].iloc[i] * (1 + threshold):
+            df.at[i, 'Bounce'] = True
+    return df
+
+def check_order_block_or_sweep(df, order_blocks, liquidity_sweeps, index):
+    for block in order_blocks:
+        if block[0] <= index <= block[1]:
+            return True  # Touching or inside an order block
+    if df['Sweep_High'].iloc[index] or df['Sweep_Low'].iloc[index]:
+        return True  # Touching a liquidity sweep
+    return False
+
+def backtest_trading_strategy(df, order_blocks, take_profit=30, stop_loss=10):
+    df['Trade'] = False
+    df['Take_Profit'] = np.nan
+    df['Stop_Loss'] = np.nan
+    df['Exit'] = np.nan
+    
+    for i in range(1, len(df)):
+        if df['Trend_Match'].iloc[i] and df['Bounce'].iloc[i] and not check_order_block_or_sweep(df, order_blocks, df, i):
+            entry_price = df['Close'].iloc[i]
+            df.at[i, 'Trade'] = True
+            df.at[i, 'Take_Profit'] = entry_price + take_profit
+            df.at[i, 'Stop_Loss'] = entry_price - stop_loss
+            
+            for j in range(i + 1, len(df)):
+                if df['Close'].iloc[j] >= df['Take_Profit'].iloc[i]:
+                    df.at[j, 'Exit'] = 'Take Profit'
+                    break
+                elif df['Close'].iloc[j] <= df['Stop_Loss'].iloc[i]:
+                    df.at[j, 'Exit'] = 'Stop Loss'
+                    break
+                elif df['Close'].iloc[j] != entry_price:
+                    df.at[j, 'Exit'] = 'No Exit'
+    return df
+
+# Load your intraday 3-minute data (replace this with actual data)
+data = {
+    'High': np.random.uniform(100, 110, 300),
+    'Low': np.random.uniform(90, 100, 300),
+    'Close': np.random.uniform(95, 105, 300),
+    'Open': np.random.uniform(95, 105, 300),
+    'Volume': np.random.randint(100, 1000, 300)
+}
+df = pd.DataFrame(data)
+
+# Add timestamps for visualization (assume intraday 3-minute data)
+df['Timestamp'] = pd.date_range("2023-01-01 09:30", periods=len(df), freq='3T')
+df.set_index('Timestamp', inplace=True)
+
+# Calculate ATR for 6 and 18 periods
+df['ATR_6'] = calculate_atr(df, period=6)
+df['ATR_18'] = calculate_atr(df, period=18)
+
+# Add column to flag high ATR values
+df = avoid_high_atr(df, atr_column='ATR_6', threshold=12)
+
+# Detect order blocks and liquidity sweeps for 3-minute timeframe
+df, order_blocks_3m = detect_order_blocks(df, consolidation_period=5, breakout_factor=1.5)
+df = detect_liquidity_sweeps(df, lookback_period=20)
+
+# Resample data to 15-minute and 1-hour timeframes
+df_15m = resample_to_timeframe(df, '15T')
+df_1h = resample_to_timeframe(df, '1H')
+
+# Detect order blocks and liquidity sweeps for 15-minute and 1-hour timeframes
+df_15m, order_blocks_15m = detect_order_blocks(df_15m, consolidation_period=5, breakout_factor=1.5)
+df_1h, order_blocks_1h = detect_order_blocks(df_1h, consolidation_period=5, breakout_factor=1.5)
+
+# Combine order blocks and liquidity sweeps from all timeframes
+all_order_blocks = order_blocks_3m + order_blocks_15m + order_blocks_1h
+
+# Calculate trends and enforce trend matching across timeframes
+df = calculate_trend(df, period=20)
+df = only_trade_when_trends_match(df, df_1h)
+
+# Detect bounces on the trend
+df = detect_bounces(df, threshold=0.01)
+
+# Backtest the strategy with take profit and stop loss
+df = backtest_trading_strategy(df, all_order_blocks, take_profit=30, stop_loss=10)
+
+# Plot results
+plt.figure(figsize=(14, 12))
+
+# Plot Close Price with Trade Signals
+plt.subplot(3, 1, 1)
+plt.plot(df['Close'], label='Close Price', color='blue')
+plt.scatter(df.index[df['Trade']], df['Close'][df['Trade']], color='green', label='Trade Entry')
+plt.scatter(df.index[df['Exit'] == 'Take Profit'], df['Close'][df['Exit'] == 'Take Profit'], color='purple', label='Take Profit Hit')
+plt.scatter(df.index[df['Exit'] == 'Stop Loss'], df['Close'][df['Exit'] == 'Stop Loss'], color='red', label='Stop Loss Hit')
+plt.title('Trading Strategy with Entry and Exit Points')
+plt.legend()
+
+plt.tight_layout()
+plt.show()
+
